@@ -7,33 +7,33 @@
 
 ## Table of Contents
 
-1. Getting Started — Installation & Setup
-2. Go Fundamentals
-3. Control Flow & Functions
-4. Data Structures — Arrays, Slices, Maps
-5. Structs, Methods & Interfaces
-6. Pointers & Memory
-7. Error Handling
-8. Packages & Modules
-9. Concurrency — Goroutines & Channels
-10. Context Package
-11. Working with JSON
-12. HTTP Fundamentals — net/http
-13. Introduction to Chi Router
-14. Building a REST API with Chi
-15. Middleware — Concepts & Implementation
-16. Request Validation
-17. Database — SQL with pgx & sqlx
-18. Database Migrations with Goose
-19. Database Transactions
-20. Dependency Injection
-21. Caching with Redis
-22. Authentication & Authorization
-23. Testing
-24. Configuration Management
-25. Logging & Observability
-26. Graceful Shutdown & Production Patterns
-27. Project Structure — Putting It All Together
+1. [Getting Started — Installation & Setup](#1-getting-started)
+2. [Go Fundamentals](#2-go-fundamentals)
+3. [Control Flow & Functions](#3-control-flow--functions)
+4. [Data Structures — Arrays, Slices, Maps](#4-data-structures)
+5. [Structs, Methods & Interfaces](#5-structs-methods--interfaces)
+6. [Pointers & Memory](#6-pointers--memory)
+7. [Error Handling](#7-error-handling)
+8. [Packages & Modules](#8-packages--modules)
+9. [Concurrency — Goroutines & Channels](#9-concurrency--goroutines--channels)
+10. [Context Package](#10-context-package)
+11. [Working with JSON](#11-working-with-json)
+12. [HTTP Fundamentals — net/http](#12-http-fundamentals--nethttp)
+13. [Introduction to Chi Router](#13-introduction-to-chi-router)
+14. [Building a REST API with Chi](#14-building-a-rest-api-with-chi)
+15. [Middleware — Concepts & Implementation](#15-middleware)
+16. [Request Validation](#16-request-validation)
+17. [Database — SQL with pgx & sqlx](#17-database--sql-with-pgx)
+18. [Database Migrations with Goose](#18-database-migrations-with-goose)
+19. [Database Transactions](#19-database-transactions)
+20. [Dependency Injection](#20-dependency-injection)
+21. [Caching with Redis](#21-caching-with-redis)
+22. [Authentication & Authorization](#22-authentication--authorization)
+23. [Testing](#23-testing)
+24. [Configuration Management](#24-configuration-management)
+25. [Logging & Observability](#25-logging-with-slog)
+26. [Graceful Shutdown & Production Patterns](#26-graceful-shutdown)
+27. [Project Structure — Putting It All Together](#27-project-structure)
 
 ---
 
