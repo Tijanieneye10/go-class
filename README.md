@@ -3202,6 +3202,239 @@ func main() {
 }
 ```
 
+### Interactive CLI — Reading Instructions from the User
+
+The `flag` package handles arguments passed at startup. For a program that **prompts the user and reacts to what they type**, use `bufio.Scanner` on `os.Stdin`.
+
+#### Minimal example — read one command at a time
+
+```go
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"strings"
+)
+
+func main() {
+	scanner := bufio.NewScanner(os.Stdin)
+
+	fmt.Println("Simple CLI. Type a command (hello / greet <name> / quit):")
+
+	for {
+		fmt.Print("> ")
+
+		if !scanner.Scan() { // EOF or error
+			break
+		}
+
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Fields(line) // split on whitespace
+		cmd := parts[0]
+
+		switch cmd {
+		case "hello":
+			fmt.Println("Hello, World!")
+
+		case "greet":
+			if len(parts) < 2 {
+				fmt.Println("Usage: greet <name>")
+			} else {
+				fmt.Printf("Hello, %s!\n", parts[1])
+			}
+
+		case "quit", "exit":
+			fmt.Println("Bye!")
+			return
+
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown command: %q. Type 'quit' to exit.\n", cmd)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, "read error:", err)
+		os.Exit(1)
+	}
+}
+```
+
+Run it:
+
+```
+$ go run main.go
+Simple CLI. Type a command (hello / greet <name> / quit):
+> hello
+Hello, World!
+> greet Alice
+Hello, Alice!
+> unknown
+Unknown command: "unknown". Type 'quit' to exit.
+> quit
+Bye!
+```
+
+#### Full interactive CLI with a help menu
+
+```go
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// Action registry — add new commands here without changing the main loop.
+type CommandFunc func(args []string)
+
+var commands map[string]CommandFunc
+
+func init() {
+	commands = map[string]CommandFunc{
+		"add":    cmdAdd,
+		"upper":  cmdUpper,
+		"repeat": cmdRepeat,
+		"help":   cmdHelp,
+		"quit":   nil, // handled separately
+	}
+}
+
+func main() {
+	fmt.Println("Interactive CLI — type 'help' for available commands.")
+	scanner := bufio.NewScanner(os.Stdin)
+
+	for {
+		fmt.Print("cli> ")
+		if !scanner.Scan() {
+			break
+		}
+
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			continue
+		}
+
+		parts := strings.Fields(input)
+		name, args := parts[0], parts[1:]
+
+		if name == "quit" || name == "exit" {
+			fmt.Println("Goodbye!")
+			return
+		}
+
+		fn, ok := commands[name]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "unknown command %q — type 'help'\n", name)
+			continue
+		}
+
+		fn(args)
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+// cmdAdd sums all integer arguments.
+func cmdAdd(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: add <num1> <num2> ...")
+		return
+	}
+	total := 0
+	for _, a := range args {
+		n, err := strconv.Atoi(a)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "not a number: %q\n", a)
+			return
+		}
+		total += n
+	}
+	fmt.Println(total)
+}
+
+// cmdUpper converts text to upper-case.
+func cmdUpper(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: upper <text...>")
+		return
+	}
+	fmt.Println(strings.ToUpper(strings.Join(args, " ")))
+}
+
+// cmdRepeat prints text N times.
+func cmdRepeat(args []string) {
+	if len(args) < 2 {
+		fmt.Println("Usage: repeat <n> <text...>")
+		return
+	}
+	n, err := strconv.Atoi(args[0])
+	if err != nil || n < 1 {
+		fmt.Fprintln(os.Stderr, "first argument must be a positive integer")
+		return
+	}
+	text := strings.Join(args[1:], " ")
+	for i := 0; i < n; i++ {
+		fmt.Println(text)
+	}
+}
+
+// cmdHelp lists available commands.
+func cmdHelp(_ []string) {
+	fmt.Println("Available commands:")
+	fmt.Println("  add <num...>       — sum numbers")
+	fmt.Println("  upper <text...>    — convert to upper-case")
+	fmt.Println("  repeat <n> <text>  — print text n times")
+	fmt.Println("  help               — show this message")
+	fmt.Println("  quit / exit        — exit the program")
+}
+```
+
+Sample session:
+
+```
+$ go run main.go
+Interactive CLI — type 'help' for available commands.
+cli> help
+Available commands:
+  add <num...>       — sum numbers
+  upper <text...>    — convert to upper-case
+  repeat <n> <text>  — print text n times
+  help               — show this message
+  quit / exit        — exit the program
+cli> add 3 4 5
+12
+cli> upper hello world
+HELLO WORLD
+cli> repeat 3 Go is great
+Go is great
+Go is great
+Go is great
+cli> quit
+Goodbye!
+```
+
+#### Key points
+
+| Topic | Detail |
+|---|---|
+| Reading input | `bufio.NewScanner(os.Stdin)` — handles lines of any length |
+| Parsing | `strings.Fields(line)` splits on any whitespace |
+| Extensibility | A `map[string]CommandFunc` registry lets you add commands without changing the loop |
+| EOF / Ctrl-D | `scanner.Scan()` returns `false`; call `scanner.Err()` to distinguish EOF from error |
+| Ctrl-C | The OS sends SIGINT; the program exits immediately — no extra handling needed for basic tools |
+
 ---
 
 ## Appendix H: Functional Options Pattern
