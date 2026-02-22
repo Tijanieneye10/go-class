@@ -35,6 +35,18 @@
 26. [Graceful Shutdown & Production Patterns](#26-graceful-shutdown)
 27. [Project Structure — Putting It All Together](#27-project-structure)
 
+**Appendices**
+
+- [Appendix A: Generics (Go 1.18+)](#appendix-a-generics-go-118)
+- [Appendix B: Chi Middleware Reference](#appendix-b-chi-middleware-reference)
+- [Appendix C: Go vs Laravel Quick Reference](#appendix-c-go-vs-laravel-quick-reference)
+- [Appendix D: File I/O](#appendix-d-file-io)
+- [Appendix E: Regular Expressions](#appendix-e-regular-expressions)
+- [Appendix F: Embedded Files — go:embed](#appendix-f-embedded-files--goembed)
+- [Appendix G: CLI with the flag Package](#appendix-g-cli-with-the-flag-package)
+- [Appendix H: Functional Options Pattern](#appendix-h-functional-options-pattern)
+- [Appendix I: Sending Email](#appendix-i-sending-email)
+
 ---
 
 ## 1. Getting Started
@@ -1118,6 +1130,62 @@ func fetchAllData(ctx context.Context) error {
     // If one fails, ctx is cancelled — signaling others to stop
     return g.Wait()
 }
+```
+
+### sync.Once (run exactly once — singleton initialization)
+
+```go
+import (
+    "context"
+    "fmt"
+    "sync"
+
+    "github.com/jackc/pgx/v5/pgxpool" // go get github.com/jackc/pgx/v5
+)
+
+// sync.Once guarantees a function runs exactly once, even across goroutines.
+// Perfect for lazy initialization of shared resources.
+
+type Database struct {
+    pool *pgxpool.Pool
+}
+
+var (
+    dbInstance *Database
+    dbOnce     sync.Once
+)
+
+func GetDB(connStr string) *Database {
+    dbOnce.Do(func() {
+        pool, err := pgxpool.New(context.Background(), connStr)
+        if err != nil {
+            panic(fmt.Sprintf("failed to connect to db: %v", err))
+        }
+        dbInstance = &Database{pool: pool}
+    })
+    return dbInstance
+}
+
+// sync.Map — concurrent-safe map (use when reads far outnumber writes)
+var cache sync.Map
+
+func setCache(key string, value interface{}) {
+    cache.Store(key, value)
+}
+
+func getCache(key string) (interface{}, bool) {
+    return cache.Load(key)
+}
+
+func deleteCache(key string) {
+    cache.Delete(key)
+}
+
+// Iterate
+cache.Range(func(key, value interface{}) bool {
+    fmt.Printf("%v: %v\n", key, value)
+    return true // return false to stop iteration
+})
 ```
 
 ---
@@ -2530,6 +2598,138 @@ go test -v -race -cover ./... # Verbose + race detection + coverage
 go test -run TestName ./...   # Specific test
 ```
 
+### Benchmark Tests
+
+```go
+// Benchmarks measure performance. Run with: go test -bench=. -benchmem ./...
+
+func BenchmarkSum(b *testing.B) {
+    nums := make([]int, 1000)
+    for i := range nums {
+        nums[i] = i
+    }
+    b.ResetTimer() // Don't count setup time
+    for i := 0; i < b.N; i++ {
+        sum(nums)
+    }
+}
+
+// Compare implementations
+func BenchmarkStringConcat(b *testing.B) {
+    for i := 0; i < b.N; i++ {
+        result := ""
+        for j := 0; j < 100; j++ {
+            result += "x"
+        }
+        _ = result
+    }
+}
+
+func BenchmarkStringBuilder(b *testing.B) {
+    for i := 0; i < b.N; i++ {
+        var sb strings.Builder
+        for j := 0; j < 100; j++ {
+            sb.WriteString("x")
+        }
+        _ = sb.String()
+    }
+}
+```
+
+```bash
+go test -bench=. -benchmem ./...
+# BenchmarkStringConcat-8     100000   14523 ns/op   5336 B/op   99 allocs/op
+# BenchmarkStringBuilder-8   1000000    1021 ns/op    568 B/op    8 allocs/op
+```
+
+### Mock Testing with testify
+
+```bash
+go get github.com/stretchr/testify
+```
+
+```go
+// Define an interface for your dependency
+type UserRepository interface {
+    GetByID(ctx context.Context, id int) (*User, error)
+    Create(ctx context.Context, u *User) error
+}
+
+// UserService depends on the interface, not the concrete type
+type UserService struct {
+    repo UserRepository
+}
+
+func (s *UserService) GetUser(ctx context.Context, id int) (*User, error) {
+    if id <= 0 {
+        return nil, errors.New("invalid id")
+    }
+    return s.repo.GetByID(ctx, id)
+}
+
+// --- In your test file ---
+import (
+    "testing"
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/mock"
+)
+
+// Mock implements UserRepository
+type MockUserRepo struct {
+    mock.Mock
+}
+
+func (m *MockUserRepo) GetByID(ctx context.Context, id int) (*User, error) {
+    args := m.Called(ctx, id)
+    if args.Get(0) == nil {
+        return nil, args.Error(1)
+    }
+    return args.Get(0).(*User), args.Error(1)
+}
+
+func (m *MockUserRepo) Create(ctx context.Context, u *User) error {
+    return m.Called(ctx, u).Error(0)
+}
+
+func TestGetUser_Found(t *testing.T) {
+    repo := new(MockUserRepo)
+    svc := &UserService{repo: repo}
+    ctx := context.Background()
+
+    expected := &User{ID: 1, FirstName: "Brainy"}
+    repo.On("GetByID", ctx, 1).Return(expected, nil)
+
+    user, err := svc.GetUser(ctx, 1)
+
+    assert.NoError(t, err)
+    assert.Equal(t, expected, user)
+    repo.AssertExpectations(t)
+}
+
+func TestGetUser_InvalidID(t *testing.T) {
+    repo := new(MockUserRepo)
+    svc := &UserService{repo: repo}
+
+    _, err := svc.GetUser(context.Background(), 0)
+
+    assert.EqualError(t, err, "invalid id")
+    repo.AssertNotCalled(t, "GetByID")
+}
+
+func TestGetUser_NotFound(t *testing.T) {
+    repo := new(MockUserRepo)
+    svc := &UserService{repo: repo}
+    ctx := context.Background()
+
+    repo.On("GetByID", ctx, 99).Return(nil, errors.New("not found"))
+
+    _, err := svc.GetUser(ctx, 99)
+
+    assert.EqualError(t, err, "not found")
+    repo.AssertExpectations(t)
+}
+```
+
 ---
 
 ## 24. Configuration Management
@@ -2732,6 +2932,729 @@ r.Use(middleware.StripSlashes)  // Remove trailing slashes
 | Trait | Struct embedding |
 | Interface `implements` | Implicit (just implement methods) |
 | `composer.json` | `go.mod` |
+
+---
+
+## Appendix D: File I/O
+
+```go
+import (
+    "bufio"
+    "fmt"
+    "log"
+    "os"
+    "path/filepath"
+    "strings"
+)
+
+// Read entire file
+data, err := os.ReadFile("config.json")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(string(data))
+
+// Write entire file (creates or truncates)
+err = os.WriteFile("output.txt", []byte("hello\n"), 0644)
+
+// Append to file
+f, err := os.OpenFile("log.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+if err != nil {
+    log.Fatal(err)
+}
+defer f.Close()
+fmt.Fprintln(f, "new log line")
+
+// Read line-by-line (efficient for large files)
+func readLines(path string) ([]string, error) {
+    f, err := os.Open(path)
+    if err != nil {
+        return nil, err
+    }
+    defer f.Close()
+
+    var lines []string
+    scanner := bufio.NewScanner(f)
+    for scanner.Scan() {
+        lines = append(lines, scanner.Text())
+    }
+    return lines, scanner.Err()
+}
+
+// Write with bufio (batches writes — faster for many small writes)
+func writeLines(path string, lines []string) error {
+    f, err := os.Create(path)
+    if err != nil {
+        return err
+    }
+    defer f.Close()
+
+    w := bufio.NewWriter(f)
+    for _, line := range lines {
+        fmt.Fprintln(w, line)
+    }
+    return w.Flush() // IMPORTANT: flush buffered data
+}
+
+// Check if file / directory exists
+func exists(path string) bool {
+    _, err := os.Stat(path)
+    return !os.IsNotExist(err)
+}
+
+// Walk a directory tree
+err = filepath.WalkDir("./uploads", func(path string, d os.DirEntry, err error) error {
+    if err != nil {
+        return err
+    }
+    if !d.IsDir() && strings.HasSuffix(path, ".json") {
+        fmt.Println("Found:", path)
+    }
+    return nil
+})
+
+// Create temp file (useful in tests)
+tmp, err := os.CreateTemp("", "myapp-*.json")
+defer os.Remove(tmp.Name())
+```
+
+---
+
+## Appendix E: Regular Expressions
+
+```go
+import "regexp"
+
+// Compile once, reuse (panic on invalid pattern — use at package level)
+var emailRe = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
+var phoneRe = regexp.MustCompile(`^\+?[1-9]\d{7,14}$`)
+var uuidRe  = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// Match
+fmt.Println(emailRe.MatchString("user@example.com"))  // true
+fmt.Println(emailRe.MatchString("not-an-email"))       // false
+
+// Find first match
+re := regexp.MustCompile(`\d+`)
+fmt.Println(re.FindString("order-12345-abc"))          // "12345"
+
+// Find all matches
+nums := re.FindAllString("a1 b22 c333", -1)            // ["1", "22", "333"]
+
+// Named capture groups
+dateRe := regexp.MustCompile(`(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})`)
+match := dateRe.FindStringSubmatch("2024-01-15")
+names := dateRe.SubexpNames()
+result := map[string]string{}
+for i, name := range names {
+    if i != 0 && name != "" && i < len(match) {
+        result[name] = match[i]
+    }
+}
+fmt.Println(result) // map[day:15 month:01 year:2024]
+
+// Replace
+cleaned := regexp.MustCompile(`\s+`).ReplaceAllString("hello   world", " ")
+fmt.Println(cleaned) // "hello world"
+
+// Split
+parts := regexp.MustCompile(`[,;\s]+`).Split("a, b; c d", -1)
+fmt.Println(parts) // [a b c d]
+
+// In a validator (compile at package level for performance)
+var (
+    reEmail = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
+    reSlug  = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+)
+
+func isValidEmail(s string) bool { return reEmail.MatchString(s) }
+func isValidSlug(s string) bool  { return reSlug.MatchString(s) }
+```
+
+---
+
+## Appendix F: Embedded Files — go:embed
+
+Embed static files directly into your binary at compile time. No need to ship separate asset directories.
+
+```go
+import _ "embed"
+
+// Embed a single file as a string
+//go:embed templates/welcome.html
+var welcomeHTML string
+
+// Embed a single file as bytes
+//go:embed configs/default.json
+var defaultConfig []byte
+
+// Embed an entire directory (use io/fs to read)
+import "embed"
+
+//go:embed static
+var staticFiles embed.FS
+
+//go:embed migrations
+var migrationsFS embed.FS
+```
+
+```go
+// Serve embedded static files over HTTP
+import (
+    "embed"
+    "io/fs"
+    "net/http"
+)
+
+//go:embed static
+var staticFS embed.FS
+
+func main() {
+    // Serve files under static/ at /static/
+    sub, _ := fs.Sub(staticFS, "static")
+    http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(sub))))
+}
+
+// Read embedded migration files with goose
+import "github.com/pressly/goose/v3"
+
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
+
+func runMigrations(db *sql.DB) error {
+    goose.SetBaseFS(migrationsFS)
+    return goose.Up(db, "migrations")
+}
+
+// Read an embedded config file
+//go:embed configs/default.json
+var defaultConfigBytes []byte
+
+func loadDefaultConfig() (*Config, error) {
+    var cfg Config
+    return &cfg, json.Unmarshal(defaultConfigBytes, &cfg)
+}
+
+// Note: json.Unmarshal requires: import "encoding/json"
+```
+
+---
+
+## Appendix G: CLI with the flag Package
+
+```go
+package main
+
+import (
+    "flag"
+    "fmt"
+    "os"
+    "time"
+)
+
+func main() {
+    // Define flags
+    port    := flag.Int("port", 3000, "HTTP server port")
+    host    := flag.String("host", "localhost", "Host to bind to")
+    verbose := flag.Bool("verbose", false, "Enable verbose logging")
+    timeout := flag.Duration("timeout", 30*time.Second, "Request timeout")
+
+    // Parse flags (reads os.Args)
+    flag.Parse()
+
+    // Remaining positional arguments after flags
+    args := flag.Args()
+
+    if *verbose {
+        fmt.Printf("Starting on %s:%d (timeout: %s)\n", *host, *port, *timeout)
+        fmt.Printf("Extra args: %v\n", args)
+    }
+
+    // Usage: ./myapp -port=8080 -host=0.0.0.0 -verbose
+    // Or:    ./myapp --port 8080 --verbose
+}
+
+// Sub-commands pattern (like git commit, git push)
+func main() {
+    if len(os.Args) < 2 {
+        fmt.Println("Usage: myapp <command> [options]")
+        fmt.Println("Commands: serve, migrate, seed")
+        os.Exit(1)
+    }
+
+    switch os.Args[1] {
+    case "serve":
+        serveCmd := flag.NewFlagSet("serve", flag.ExitOnError)
+        port := serveCmd.Int("port", 3000, "Port to listen on")
+        serveCmd.Parse(os.Args[2:])
+        runServer(*port)
+
+    case "migrate":
+        migrateCmd := flag.NewFlagSet("migrate", flag.ExitOnError)
+        dir := migrateCmd.String("dir", "migrations", "Migration directory")
+        migrateCmd.Parse(os.Args[2:])
+        runMigrations(*dir)
+
+    default:
+        fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
+        os.Exit(1)
+    }
+}
+```
+
+---
+
+## Appendix H: Functional Options Pattern
+
+A common Go pattern for configuring structs with optional parameters — avoids long constructor argument lists and keeps the API clean.
+
+```go
+import "time"
+
+// The type being configured
+type Server struct {
+    host         string
+    port         int
+    timeout      time.Duration
+    maxConns     int
+    tlsEnabled   bool
+}
+
+// Option is a function that modifies a Server
+type Option func(*Server)
+
+// Option constructors
+func WithHost(host string) Option {
+    return func(s *Server) { s.host = host }
+}
+
+func WithPort(port int) Option {
+    return func(s *Server) { s.port = port }
+}
+
+func WithTimeout(d time.Duration) Option {
+    return func(s *Server) { s.timeout = d }
+}
+
+func WithMaxConns(n int) Option {
+    return func(s *Server) { s.maxConns = n }
+}
+
+func WithTLS() Option {
+    return func(s *Server) { s.tlsEnabled = true }
+}
+
+// Constructor applies defaults, then overrides with options
+func NewServer(opts ...Option) *Server {
+    s := &Server{
+        host:     "localhost",
+        port:     3000,
+        timeout:  30 * time.Second,
+        maxConns: 100,
+    }
+    for _, opt := range opts {
+        opt(s)
+    }
+    return s
+}
+
+// Usage — only specify what you need to change
+s1 := NewServer()                                     // all defaults
+s2 := NewServer(WithPort(8080), WithTLS())            // override port + TLS
+s3 := NewServer(
+    WithHost("0.0.0.0"),
+    WithPort(443),
+    WithTimeout(60*time.Second),
+    WithMaxConns(500),
+    WithTLS(),
+)
+
+// Real-world example: Redis client options
+// Requires: go get github.com/redis/go-redis/v9
+import "github.com/redis/go-redis/v9"
+
+type RedisOptions struct {
+    Addr         string
+    Password     string
+    DB           int
+    PoolSize     int
+    ReadTimeout  time.Duration
+    WriteTimeout time.Duration
+}
+
+type RedisOption func(*RedisOptions)
+
+func WithRedisAddr(addr string) RedisOption {
+    return func(o *RedisOptions) { o.Addr = addr }
+}
+
+func WithRedisPassword(pw string) RedisOption {
+    return func(o *RedisOptions) { o.Password = pw }
+}
+
+func WithRedisPoolSize(n int) RedisOption {
+    return func(o *RedisOptions) { o.PoolSize = n }
+}
+
+func NewRedisClient(opts ...RedisOption) *redis.Client {
+    o := &RedisOptions{
+        Addr:         "localhost:6379",
+        DB:           0,
+        PoolSize:     10,
+        ReadTimeout:  3 * time.Second,
+        WriteTimeout: 3 * time.Second,
+    }
+    for _, opt := range opts {
+        opt(o)
+    }
+    return redis.NewClient(&redis.Options{
+        Addr:         o.Addr,
+        Password:     o.Password,
+        DB:           o.DB,
+        PoolSize:     o.PoolSize,
+        ReadTimeout:  o.ReadTimeout,
+        WriteTimeout: o.WriteTimeout,
+    })
+}
+```
+
+---
+
+---
+
+## Appendix I: Sending Email
+
+Go can send email via the standard `net/smtp` package or the more ergonomic `gomail` library.
+
+### 1. Plain-text email with net/smtp (stdlib)
+
+No external dependency — good for simple use-cases or when you control the SMTP server.
+
+```go
+import (
+    "fmt"
+    "net/smtp"
+)
+
+func sendPlainEmail(
+    smtpHost, smtpPort string,
+    from, password string,
+    to []string,
+    subject, body string,
+) error {
+    auth := smtp.PlainAuth("", from, password, smtpHost)
+
+    // RFC 822 message format
+    msg := fmt.Sprintf(
+        "From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s",
+        from, to[0], subject, body,
+    )
+
+    addr := smtpHost + ":" + smtpPort
+    return smtp.SendMail(addr, auth, from, to, []byte(msg))
+}
+
+// Usage
+err := sendPlainEmail(
+    "smtp.gmail.com", "587",
+    "sender@gmail.com", "app-password",
+    []string{"recipient@example.com"},
+    "Hello from Go",
+    "This is a plain text email sent from Go.",
+)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+### 2. HTML email with attachments using gomail
+
+`gomail` is the most widely used Go email library — supports HTML, multiple recipients, CC/BCC, and file attachments.
+
+```bash
+go get gopkg.in/gomail.v2
+```
+
+```go
+import (
+    "strings"
+
+    "gopkg.in/gomail.v2"
+)
+
+func sendHTMLEmail() error {
+    m := gomail.NewMessage()
+
+    m.SetHeader("From", "sender@example.com")
+    m.SetHeader("To", "alice@example.com", "bob@example.com")
+    m.SetAddressHeader("Cc", "charlie@example.com", "Charlie")
+    m.SetHeader("Subject", "Your invoice is ready")
+
+    // Plain-text fallback + HTML body
+    m.SetBody("text/plain", "Your invoice is attached.")
+    m.AddAlternative("text/html", `<h1>Invoice</h1><p>Please find your invoice <b>attached</b>.</p>`)
+
+    // Attach a file from disk
+    m.Attach("/tmp/invoice.pdf")
+
+    // Attach an in-memory file
+    m.AttachReader("report.csv", strings.NewReader("date,amount\n2024-01-01,100"))
+
+    // Send via Gmail SMTP (port 587 = STARTTLS)
+    d := gomail.NewDialer("smtp.gmail.com", 587, "sender@example.com", "app-password")
+    return d.DialAndSend(m)
+}
+```
+
+### 3. Reusable Mailer service
+
+Wrap the mailer in a struct so it can be injected into handlers and mocked in tests.
+
+```go
+package mailer
+
+import (
+    "bytes"
+    "fmt"
+    "html/template"
+
+    "gopkg.in/gomail.v2"
+)
+
+// Sender is the interface your handlers depend on — easy to mock in tests.
+type Sender interface {
+    Send(to, subject, htmlBody string) error
+    SendTemplate(to, subject, tmplName string, data any) error
+}
+
+type Config struct {
+    Host     string
+    Port     int
+    Username string
+    Password string
+    From     string
+}
+
+type Mailer struct {
+    cfg       Config
+    dialer    *gomail.Dialer
+    templates *template.Template
+}
+
+func New(cfg Config, templates *template.Template) *Mailer {
+    d := gomail.NewDialer(cfg.Host, cfg.Port, cfg.Username, cfg.Password)
+    return &Mailer{cfg: cfg, dialer: d, templates: templates}
+}
+
+func (m *Mailer) Send(to, subject, htmlBody string) error {
+    msg := gomail.NewMessage()
+    msg.SetHeader("From", m.cfg.From)
+    msg.SetHeader("To", to)
+    msg.SetHeader("Subject", subject)
+    msg.SetBody("text/html", htmlBody)
+    return m.dialer.DialAndSend(msg)
+}
+
+func (m *Mailer) SendTemplate(to, subject, tmplName string, data any) error {
+    var buf bytes.Buffer
+    if err := m.templates.ExecuteTemplate(&buf, tmplName, data); err != nil {
+        return fmt.Errorf("mailer: execute template %q: %w", tmplName, err)
+    }
+    return m.Send(to, subject, buf.String())
+}
+```
+
+Load templates at startup:
+
+```go
+// main.go
+import "html/template"
+
+tmpl := template.Must(template.ParseGlob("templates/email/*.html"))
+
+mailerCfg := mailer.Config{
+    Host:     cfg.SMTPHost,
+    Port:     cfg.SMTPPort,
+    Username: cfg.SMTPUser,
+    Password: cfg.SMTPPassword,
+    From:     cfg.SMTPFrom,
+}
+emailer := mailer.New(mailerCfg, tmpl)
+```
+
+Example email template (`templates/email/welcome.html`):
+
+```html
+<!DOCTYPE html>
+<html>
+<body>
+  <h1>Welcome, {{.Name}}!</h1>
+  <p>Click <a href="{{.VerifyURL}}">here</a> to verify your email.</p>
+</body>
+</html>
+```
+
+### 4. Sending email from a Chi handler
+
+```go
+type UserHandler struct {
+    repo   UserRepository
+    mailer mailer.Sender
+}
+
+func (h *UserHandler) Register(w http.ResponseWriter, r *http.Request) {
+    var req RegisterRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        respondJSON(w, http.StatusBadRequest, APIResponse{Error: "invalid JSON"})
+        return
+    }
+
+    user, err := h.repo.Create(r.Context(), req)
+    if err != nil {
+        respondJSON(w, http.StatusInternalServerError, APIResponse{Error: "could not create user"})
+        return
+    }
+
+    // Send welcome email asynchronously — don't block the HTTP response
+    go func() {
+        data := map[string]string{
+            "Name":      user.FirstName,
+            "VerifyURL": "https://myapp.com/verify?token=" + user.VerifyToken,
+        }
+        if err := h.mailer.SendTemplate(user.Email, "Welcome to MyApp", "welcome.html", data); err != nil {
+            slog.Error("failed to send welcome email", "error", err, "user_id", user.ID)
+        }
+    }()
+
+    respondJSON(w, http.StatusCreated, APIResponse{Success: true, Data: user})
+}
+```
+
+### 5. Testing the mailer (mock)
+
+Because handlers depend on the `Sender` interface, you can swap in a test double — no real SMTP required.
+
+```go
+import (
+    "fmt"
+    "net/http"
+    "net/http/httptest"
+    "strings"
+    "sync"
+    "testing"
+    "time"
+
+    "github.com/stretchr/testify/assert"
+)
+
+// mock_mailer.go (in your test helpers or testdata package)
+type MockMailer struct {
+    mu   sync.Mutex
+    Sent []SentEmail
+}
+
+type SentEmail struct {
+    To      string
+    Subject string
+    Body    string
+}
+
+func (m *MockMailer) Send(to, subject, body string) error {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    m.Sent = append(m.Sent, SentEmail{to, subject, body})
+    return nil
+}
+
+func (m *MockMailer) SendTemplate(to, subject, tmplName string, data any) error {
+    return m.Send(to, subject, fmt.Sprintf("template:%s", tmplName))
+}
+
+// For testing the goroutine in Register, wrap the handler so we can signal when
+// the email goroutine is done.  In production, use the plain UserHandler from
+// section 4 without the emailDone field.
+type testableUserHandler struct {
+    UserHandler
+    emailDone chan struct{}
+}
+
+func (h *testableUserHandler) Register(w http.ResponseWriter, r *http.Request) {
+    var req RegisterRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        respondJSON(w, http.StatusBadRequest, APIResponse{Error: "invalid JSON"})
+        return
+    }
+    user, err := h.repo.Create(r.Context(), req)
+    if err != nil {
+        respondJSON(w, http.StatusInternalServerError, APIResponse{Error: "could not create user"})
+        return
+    }
+
+    go func() {
+        data := map[string]string{"Name": user.FirstName, "VerifyURL": "https://myapp.com/verify?token=" + user.VerifyToken}
+        if err := h.mailer.SendTemplate(user.Email, "Welcome to MyApp", "welcome.html", data); err != nil {
+            slog.Error("failed to send welcome email", "error", err, "user_id", user.ID)
+        }
+        h.emailDone <- struct{}{}
+    }()
+
+    respondJSON(w, http.StatusCreated, APIResponse{Success: true, Data: user})
+}
+
+// In your test
+func TestRegister_SendsWelcomeEmail(t *testing.T) {
+    mockMail := &MockMailer{}
+    done := make(chan struct{}, 1)
+    handler := &testableUserHandler{
+        UserHandler: UserHandler{repo: &MockUserRepo{}, mailer: mockMail},
+        emailDone:   done,
+    }
+
+    body := `{"email":"alice@example.com","first_name":"Alice","password":"secret"}`
+    req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+    req.Header.Set("Content-Type", "application/json")
+    rr := httptest.NewRecorder()
+
+    handler.Register(rr, req)
+
+    // Wait for the email goroutine to finish (with a timeout for safety)
+    select {
+    case <-done:
+    case <-time.After(2 * time.Second):
+        t.Fatal("timed out waiting for email goroutine")
+    }
+
+    assert.Equal(t, http.StatusCreated, rr.Code)
+    assert.Len(t, mockMail.Sent, 1)
+    assert.Equal(t, "alice@example.com", mockMail.Sent[0].To)
+    assert.Contains(t, mockMail.Sent[0].Subject, "Welcome")
+}
+```
+
+### 6. Configuration (environment variables)
+
+```go
+type Config struct {
+    // ... existing fields ...
+    SMTPHost     string `envconfig:"SMTP_HOST"     default:"smtp.gmail.com"`
+    SMTPPort     int    `envconfig:"SMTP_PORT"     default:"587"`
+    SMTPUser     string `envconfig:"SMTP_USER"     required:"true"`
+    SMTPPassword string `envconfig:"SMTP_PASSWORD" required:"true"`
+    SMTPFrom     string `envconfig:"SMTP_FROM"     required:"true"`
+}
+```
+
+`.env.example`:
+
+```env
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=sender@gmail.com
+SMTP_PASSWORD=your-app-password   # Generate at myaccount.google.com/apppasswords
+SMTP_FROM="MyApp <noreply@myapp.com>"
+```
+
+> **Popular SMTP providers:** Gmail (port 587), SendGrid (`smtp.sendgrid.net:587`), Mailgun (`smtp.mailgun.org:587`), AWS SES (`email-smtp.<region>.amazonaws.com:587`).
 
 ---
 
