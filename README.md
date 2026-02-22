@@ -45,6 +45,7 @@
 - [Appendix F: Embedded Files — go:embed](#appendix-f-embedded-files--goembed)
 - [Appendix G: CLI with the flag Package](#appendix-g-cli-with-the-flag-package)
 - [Appendix H: Functional Options Pattern](#appendix-h-functional-options-pattern)
+- [Appendix I: Sending Email](#appendix-i-sending-email)
 
 ---
 
@@ -3316,6 +3317,344 @@ func NewRedisClient(opts ...RedisOption) *redis.Client {
     })
 }
 ```
+
+---
+
+---
+
+## Appendix I: Sending Email
+
+Go can send email via the standard `net/smtp` package or the more ergonomic `gomail` library.
+
+### 1. Plain-text email with net/smtp (stdlib)
+
+No external dependency — good for simple use-cases or when you control the SMTP server.
+
+```go
+import (
+    "fmt"
+    "net/smtp"
+)
+
+func sendPlainEmail(
+    smtpHost, smtpPort string,
+    from, password string,
+    to []string,
+    subject, body string,
+) error {
+    auth := smtp.PlainAuth("", from, password, smtpHost)
+
+    // RFC 822 message format
+    msg := fmt.Sprintf(
+        "From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s",
+        from, to[0], subject, body,
+    )
+
+    addr := smtpHost + ":" + smtpPort
+    return smtp.SendMail(addr, auth, from, to, []byte(msg))
+}
+
+// Usage
+err := sendPlainEmail(
+    "smtp.gmail.com", "587",
+    "sender@gmail.com", "app-password",
+    []string{"recipient@example.com"},
+    "Hello from Go",
+    "This is a plain text email sent from Go.",
+)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+### 2. HTML email with attachments using gomail
+
+`gomail` is the most widely used Go email library — supports HTML, multiple recipients, CC/BCC, and file attachments.
+
+```bash
+go get gopkg.in/gomail.v2
+```
+
+```go
+import (
+    "strings"
+
+    "gopkg.in/gomail.v2"
+)
+
+func sendHTMLEmail() error {
+    m := gomail.NewMessage()
+
+    m.SetHeader("From", "sender@example.com")
+    m.SetHeader("To", "alice@example.com", "bob@example.com")
+    m.SetAddressHeader("Cc", "charlie@example.com", "Charlie")
+    m.SetHeader("Subject", "Your invoice is ready")
+
+    // Plain-text fallback + HTML body
+    m.SetBody("text/plain", "Your invoice is attached.")
+    m.AddAlternative("text/html", `<h1>Invoice</h1><p>Please find your invoice <b>attached</b>.</p>`)
+
+    // Attach a file from disk
+    m.Attach("/tmp/invoice.pdf")
+
+    // Attach an in-memory file
+    m.AttachReader("report.csv", strings.NewReader("date,amount\n2024-01-01,100"))
+
+    // Send via Gmail SMTP (port 587 = STARTTLS)
+    d := gomail.NewDialer("smtp.gmail.com", 587, "sender@example.com", "app-password")
+    return d.DialAndSend(m)
+}
+```
+
+### 3. Reusable Mailer service
+
+Wrap the mailer in a struct so it can be injected into handlers and mocked in tests.
+
+```go
+package mailer
+
+import (
+    "bytes"
+    "fmt"
+    "html/template"
+
+    "gopkg.in/gomail.v2"
+)
+
+// Sender is the interface your handlers depend on — easy to mock in tests.
+type Sender interface {
+    Send(to, subject, htmlBody string) error
+    SendTemplate(to, subject, tmplName string, data any) error
+}
+
+type Config struct {
+    Host     string
+    Port     int
+    Username string
+    Password string
+    From     string
+}
+
+type Mailer struct {
+    cfg       Config
+    dialer    *gomail.Dialer
+    templates *template.Template
+}
+
+func New(cfg Config, templates *template.Template) *Mailer {
+    d := gomail.NewDialer(cfg.Host, cfg.Port, cfg.Username, cfg.Password)
+    return &Mailer{cfg: cfg, dialer: d, templates: templates}
+}
+
+func (m *Mailer) Send(to, subject, htmlBody string) error {
+    msg := gomail.NewMessage()
+    msg.SetHeader("From", m.cfg.From)
+    msg.SetHeader("To", to)
+    msg.SetHeader("Subject", subject)
+    msg.SetBody("text/html", htmlBody)
+    return m.dialer.DialAndSend(msg)
+}
+
+func (m *Mailer) SendTemplate(to, subject, tmplName string, data any) error {
+    var buf bytes.Buffer
+    if err := m.templates.ExecuteTemplate(&buf, tmplName, data); err != nil {
+        return fmt.Errorf("mailer: execute template %q: %w", tmplName, err)
+    }
+    return m.Send(to, subject, buf.String())
+}
+```
+
+Load templates at startup:
+
+```go
+// main.go
+import "html/template"
+
+tmpl := template.Must(template.ParseGlob("templates/email/*.html"))
+
+mailerCfg := mailer.Config{
+    Host:     cfg.SMTPHost,
+    Port:     cfg.SMTPPort,
+    Username: cfg.SMTPUser,
+    Password: cfg.SMTPPassword,
+    From:     cfg.SMTPFrom,
+}
+emailer := mailer.New(mailerCfg, tmpl)
+```
+
+Example email template (`templates/email/welcome.html`):
+
+```html
+<!DOCTYPE html>
+<html>
+<body>
+  <h1>Welcome, {{.Name}}!</h1>
+  <p>Click <a href="{{.VerifyURL}}">here</a> to verify your email.</p>
+</body>
+</html>
+```
+
+### 4. Sending email from a Chi handler
+
+```go
+type UserHandler struct {
+    repo   UserRepository
+    mailer mailer.Sender
+}
+
+func (h *UserHandler) Register(w http.ResponseWriter, r *http.Request) {
+    var req RegisterRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        respondJSON(w, http.StatusBadRequest, APIResponse{Error: "invalid JSON"})
+        return
+    }
+
+    user, err := h.repo.Create(r.Context(), req)
+    if err != nil {
+        respondJSON(w, http.StatusInternalServerError, APIResponse{Error: "could not create user"})
+        return
+    }
+
+    // Send welcome email asynchronously — don't block the HTTP response
+    go func() {
+        data := map[string]string{
+            "Name":      user.FirstName,
+            "VerifyURL": "https://myapp.com/verify?token=" + user.VerifyToken,
+        }
+        if err := h.mailer.SendTemplate(user.Email, "Welcome to MyApp", "welcome.html", data); err != nil {
+            slog.Error("failed to send welcome email", "error", err, "user_id", user.ID)
+        }
+    }()
+
+    respondJSON(w, http.StatusCreated, APIResponse{Success: true, Data: user})
+}
+```
+
+### 5. Testing the mailer (mock)
+
+Because handlers depend on the `Sender` interface, you can swap in a test double — no real SMTP required.
+
+```go
+import (
+    "fmt"
+    "net/http"
+    "net/http/httptest"
+    "strings"
+    "sync"
+    "testing"
+    "time"
+
+    "github.com/stretchr/testify/assert"
+)
+
+// mock_mailer.go (in your test helpers or testdata package)
+type MockMailer struct {
+    mu   sync.Mutex
+    Sent []SentEmail
+}
+
+type SentEmail struct {
+    To      string
+    Subject string
+    Body    string
+}
+
+func (m *MockMailer) Send(to, subject, body string) error {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    m.Sent = append(m.Sent, SentEmail{to, subject, body})
+    return nil
+}
+
+func (m *MockMailer) SendTemplate(to, subject, tmplName string, data any) error {
+    return m.Send(to, subject, fmt.Sprintf("template:%s", tmplName))
+}
+
+// For testing the goroutine in Register, wrap the handler so we can signal when
+// the email goroutine is done.  In production, use the plain UserHandler from
+// section 4 without the emailDone field.
+type testableUserHandler struct {
+    UserHandler
+    emailDone chan struct{}
+}
+
+func (h *testableUserHandler) Register(w http.ResponseWriter, r *http.Request) {
+    var req RegisterRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        respondJSON(w, http.StatusBadRequest, APIResponse{Error: "invalid JSON"})
+        return
+    }
+    user, err := h.repo.Create(r.Context(), req)
+    if err != nil {
+        respondJSON(w, http.StatusInternalServerError, APIResponse{Error: "could not create user"})
+        return
+    }
+
+    go func() {
+        data := map[string]string{"Name": user.FirstName, "VerifyURL": "https://myapp.com/verify?token=" + user.VerifyToken}
+        if err := h.mailer.SendTemplate(user.Email, "Welcome to MyApp", "welcome.html", data); err != nil {
+            slog.Error("failed to send welcome email", "error", err, "user_id", user.ID)
+        }
+        h.emailDone <- struct{}{}
+    }()
+
+    respondJSON(w, http.StatusCreated, APIResponse{Success: true, Data: user})
+}
+
+// In your test
+func TestRegister_SendsWelcomeEmail(t *testing.T) {
+    mockMail := &MockMailer{}
+    done := make(chan struct{}, 1)
+    handler := &testableUserHandler{
+        UserHandler: UserHandler{repo: &MockUserRepo{}, mailer: mockMail},
+        emailDone:   done,
+    }
+
+    body := `{"email":"alice@example.com","first_name":"Alice","password":"secret"}`
+    req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+    req.Header.Set("Content-Type", "application/json")
+    rr := httptest.NewRecorder()
+
+    handler.Register(rr, req)
+
+    // Wait for the email goroutine to finish (with a timeout for safety)
+    select {
+    case <-done:
+    case <-time.After(2 * time.Second):
+        t.Fatal("timed out waiting for email goroutine")
+    }
+
+    assert.Equal(t, http.StatusCreated, rr.Code)
+    assert.Len(t, mockMail.Sent, 1)
+    assert.Equal(t, "alice@example.com", mockMail.Sent[0].To)
+    assert.Contains(t, mockMail.Sent[0].Subject, "Welcome")
+}
+```
+
+### 6. Configuration (environment variables)
+
+```go
+type Config struct {
+    // ... existing fields ...
+    SMTPHost     string `envconfig:"SMTP_HOST"     default:"smtp.gmail.com"`
+    SMTPPort     int    `envconfig:"SMTP_PORT"     default:"587"`
+    SMTPUser     string `envconfig:"SMTP_USER"     required:"true"`
+    SMTPPassword string `envconfig:"SMTP_PASSWORD" required:"true"`
+    SMTPFrom     string `envconfig:"SMTP_FROM"     required:"true"`
+}
+```
+
+`.env.example`:
+
+```env
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=sender@gmail.com
+SMTP_PASSWORD=your-app-password   # Generate at myaccount.google.com/apppasswords
+SMTP_FROM="MyApp <noreply@myapp.com>"
+```
+
+> **Popular SMTP providers:** Gmail (port 587), SendGrid (`smtp.sendgrid.net:587`), Mailgun (`smtp.mailgun.org:587`), AWS SES (`email-smtp.<region>.amazonaws.com:587`).
 
 ---
 
