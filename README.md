@@ -46,6 +46,7 @@
 - [Appendix G: CLI with the flag Package](#appendix-g-cli-with-the-flag-package)
 - [Appendix H: Functional Options Pattern](#appendix-h-functional-options-pattern)
 - [Appendix I: Sending Email](#appendix-i-sending-email)
+- [Appendix J: Task Scheduling with Cron](#appendix-j-task-scheduling-with-cron)
 
 ---
 
@@ -3888,6 +3889,252 @@ SMTP_FROM="MyApp <noreply@myapp.com>"
 ```
 
 > **Popular SMTP providers:** Gmail (port 587), SendGrid (`smtp.sendgrid.net:587`), Mailgun (`smtp.mailgun.org:587`), AWS SES (`email-smtp.<region>.amazonaws.com:587`).
+
+---
+
+## Appendix J: Task Scheduling with Cron
+
+Go doesn't ship with a built-in task scheduler, but the widely used [`robfig/cron`](https://github.com/robfig/cron) library gives you cron-style scheduling with goroutine-safe execution.
+
+### Installation
+
+```bash
+go get github.com/robfig/cron/v3
+```
+
+### Cron Expression Syntax
+
+`robfig/cron/v3` uses a **five-field** expression by default (minute granularity). Use `cron.WithSeconds()` for a six-field expression that includes seconds.
+
+| Field        | Allowed Values | Special Characters |
+|-------------|----------------|-------------------|
+| Minute      | 0–59           | `, - * /`         |
+| Hour        | 0–23           | `, - * /`         |
+| Day (month) | 1–31           | `, - * /`         |
+| Month       | 1–12 or JAN–DEC | `, - * /`       |
+| Day (week)  | 0–6 or SUN–SAT | `, - * /`         |
+
+Common examples:
+
+| Expression     | Meaning                      |
+|----------------|------------------------------|
+| `* * * * *`    | Every minute                 |
+| `0 * * * *`    | Every hour (at minute 0)     |
+| `30 2 * * *`   | Daily at 02:30               |
+| `0 9 * * 1-5`  | Weekdays at 09:00            |
+| `@every 30s`   | Every 30 seconds (shorthand) |
+| `@hourly`      | Every hour                   |
+| `@daily`       | Every day at midnight        |
+| `@weekly`      | Every Sunday at midnight     |
+
+> **Note:** `@every` and the predefined shortcuts (`@hourly`, `@daily`, `@weekly`) work regardless of whether `cron.WithSeconds()` is enabled.
+
+### 1. Basic Cron Usage
+
+```go
+package main
+
+import (
+    "fmt"
+    "time"
+
+    "github.com/robfig/cron/v3"
+)
+
+func main() {
+    c := cron.New()
+
+    // Run every minute
+    c.AddFunc("* * * * *", func() {
+        fmt.Println("task executed at", time.Now().Format(time.RFC3339))
+    })
+
+    // Run every day at midnight
+    c.AddFunc("@daily", func() {
+        fmt.Println("daily cleanup at", time.Now().Format(time.RFC3339))
+    })
+
+    c.Start()
+
+    // Keep the process alive
+    select {}
+}
+```
+
+### 2. Second-Precision Scheduling
+
+Pass `cron.WithSeconds()` to use a six-field expression where the first field is seconds.
+
+```go
+c := cron.New(cron.WithSeconds())
+
+// Run every 10 seconds
+c.AddFunc("*/10 * * * * *", func() {
+    fmt.Println("heartbeat", time.Now().Format(time.TimeOnly))
+})
+
+c.Start()
+```
+
+### 3. Using Job Interface for Structured Tasks
+
+For more complex tasks, implement the `cron.Job` interface instead of inline functions.
+
+```go
+// CacheRefreshJob refreshes an application cache on a schedule.
+type CacheRefreshJob struct {
+    Name     string
+    CacheSvc *CacheService
+}
+
+func (j CacheRefreshJob) Run() {
+    if err := j.CacheSvc.Refresh(); err != nil {
+        slog.Error("cache refresh failed", "job", j.Name, "error", err)
+        return
+    }
+    slog.Info("cache refreshed", "job", j.Name)
+}
+
+// Register the job
+c := cron.New()
+c.AddJob("@every 5m", CacheRefreshJob{
+    Name:     "product-cache",
+    CacheSvc: cacheService,
+})
+c.Start()
+```
+
+### 4. Logging & Error Recovery
+
+Wrap jobs with a logger and panic recovery so one failing job never crashes the scheduler.
+
+```go
+c := cron.New(
+    cron.WithLogger(cron.VerbosePrintfLogger(log.New(os.Stdout, "cron: ", log.LstdFlags))),
+    cron.WithChain(
+        cron.Recover(cron.DefaultLogger), // catch panics
+    ),
+)
+```
+
+### 5. Managing Job Entries
+
+`AddFunc` and `AddJob` return an `EntryID` you can use to inspect or remove jobs at runtime.
+
+```go
+id, _ := c.AddFunc("@every 1m", myTask)
+
+// Inspect the entry
+entry := c.Entry(id)
+fmt.Println("next run:", entry.Next)
+fmt.Println("prev run:", entry.Prev)
+
+// Remove the job
+c.Remove(id)
+```
+
+### 6. Graceful Shutdown Integration
+
+Always stop the scheduler cleanly when your application exits. This pairs naturally with the graceful shutdown pattern from Chapter 26.
+
+```go
+package main
+
+import (
+    "log/slog"
+    "os"
+    "os/signal"
+    "syscall"
+
+    "github.com/robfig/cron/v3"
+)
+
+func main() {
+    c := cron.New()
+
+    c.AddFunc("@every 30s", func() {
+        slog.Info("periodic health check")
+    })
+
+    c.AddFunc("0 2 * * *", func() {
+        slog.Info("nightly data cleanup")
+    })
+
+    c.Start()
+    slog.Info("scheduler started")
+
+    // Wait for termination signal
+    quit := make(chan os.Signal, 1)
+    signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+    <-quit
+
+    slog.Info("shutting down scheduler…")
+
+    // Stop waits for running jobs to finish, then stops scheduling new ones
+    ctx := c.Stop()
+    <-ctx.Done()
+
+    slog.Info("scheduler stopped")
+}
+```
+
+### 7. Real-World Pattern — Scheduler as a Service
+
+In a production app, treat the scheduler as a dependency you inject just like a database or cache.
+
+```go
+// scheduler.go
+package scheduler
+
+import (
+    "log/slog"
+
+    "github.com/robfig/cron/v3"
+)
+
+type Scheduler struct {
+    cron *cron.Cron
+}
+
+func New() *Scheduler {
+    c := cron.New(
+        cron.WithChain(cron.Recover(cron.DefaultLogger)),
+    )
+    return &Scheduler{cron: c}
+}
+
+func (s *Scheduler) Register(spec string, job func()) error {
+    _, err := s.cron.AddFunc(spec, job)
+    return err
+}
+
+func (s *Scheduler) Start() {
+    s.cron.Start()
+    slog.Info("scheduler started", "jobs", len(s.cron.Entries()))
+}
+
+func (s *Scheduler) Stop() {
+    ctx := s.cron.Stop()
+    <-ctx.Done()
+    slog.Info("scheduler stopped")
+}
+```
+
+Wire it up in `main.go`:
+
+```go
+sched := scheduler.New()
+
+// Register jobs
+sched.Register("@every 5m",  func() { cacheService.Refresh() })
+sched.Register("0 2 * * *",  func() { dbService.PruneExpiredSessions() })
+sched.Register("0 * * * *",  func() { metricsService.FlushCounters() })
+
+sched.Start()
+defer sched.Stop()
+```
+
+> **Tip:** If you need distributed task scheduling (multiple instances of your app), consider a database-backed approach or a tool like [`go-co-op/gocron`](https://github.com/go-co-op/gocron) which supports distributed locking.
 
 ---
 
